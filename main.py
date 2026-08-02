@@ -1,5 +1,6 @@
 import os
 import shutil
+import json
 from fastapi import FastAPI, UploadFile, File, HTTPException
 import whisper
 import openai
@@ -10,7 +11,6 @@ app = FastAPI(title="M.A.R.K. Content Engine")
 model = whisper.load_model("base")
 
 # OpenRouter / OpenAI client configuration
-# (Ensures your API key is pulled from environment variables)
 client = openai.OpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
     base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
@@ -56,7 +56,9 @@ async def process_video(file: UploadFile = File(...)):
             response_format={"type": "json_object"}
         )
 
-        formatted_content = response.parse()
+        # Extract message text safely and parse JSON manually
+        raw_json_str = response.choices[0].message.content
+        formatted_content = json.loads(raw_json_str)
 
         return {
             "status": "success",
