@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Install ONLY minimal essential packages without bloated GUI dependencies
+# Install minimal system dependencies without extra GUI bloat
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
@@ -9,7 +9,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Upgrade build tools
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 COPY requirements.txt .
