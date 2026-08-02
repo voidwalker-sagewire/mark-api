@@ -1,7 +1,7 @@
 FROM python:3.10-slim
 
-# Install system dependencies including ffmpeg for video processing
-RUN apt-get update && apt-get install -y \
+# Install ONLY minimal essential packages without bloated GUI dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
     curl \
@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Upgrade pip, setuptools, and wheel FIRST to fix pkg_resources issue
+# Upgrade build tools
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 COPY requirements.txt .
