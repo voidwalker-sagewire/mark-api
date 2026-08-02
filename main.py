@@ -1,34 +1,74 @@
 import os
+import shutil
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
+import whisper
+import openai
 
-app = FastAPI(title="M.A.R.K. - Mobile Automated Record Keeper", version="1.0.0")
+app = FastAPI(title="M.A.R.K. Content Engine")
 
-@app.get("/health")
-def health_check():
-    """Internal and external health check endpoint."""
-    return {"status": "healthy", "service": "mark-api"}
+# Load Whisper model once on startup
+model = whisper.load_model("base")
+
+# OpenRouter / OpenAI client configuration
+# (Ensures your API key is pulled from environment variables)
+client = openai.OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+)
 
 @app.post("/process-video")
 async def process_video(file: UploadFile = File(...)):
-    """
-    Receives raw video file, handles transcription, 
-    metadata extraction, and formatting pipeline.
-    """
-    if not file.filename.endswith((".mp4", ".mov", ".avi", ".mkv")):
-        raise HTTPException(status_code=400, detail="Invalid video file format.")
+    temp_video_path = f"/tmp/{file.filename}"
     
-    # Save incoming file temporarily
-    temp_file_path = f"/tmp/{file.filename}"
     try:
-        contents = await file.read()
-        with open(temp_file_path, "wb") as f:
-            f.write(contents)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+        # 1. Save uploaded video to temporary storage
+        with open(temp_video_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
-    return JSONResponse(content={
-        "filename": file.filename,
-        "status": "received",
-        "message": "M.A.R.K. has successfully staged video for processing."
-    })
+        # 2. Transcribe audio track via Whisper
+        result = model.transcribe(temp_video_path)
+        raw_transcript = result.get("text", "").strip()
+
+        if not raw_transcript:
+            raise HTTPException(status_code=400, detail="No speech could be extracted from the video.")
+
+        # 3. Pass raw transcript to LLM to generate all content formats
+        prompt = f"""
+        You are the content generator for a builder who speaks candidly about engineering, software, and real-world execution.
+        
+        Analyze the following raw transcript from a video recording and generate three distinct outputs:
+        1. "summary": A clear 2-3 sentence executive summary in plain English explaining what was done/built so non-technical people understand it immediately.
+        2. "x_post": A short, punchy, engaging post (or short thread format) optimized for X (Twitter).
+        3. "newsletter": A well-structured section suitable for an email newsletter or blog update.
+
+        Raw Transcript:
+        "{raw_transcript}"
+
+        Return your response strictly as valid JSON with keys: "summary", "x_post", "newsletter".
+        """
+
+        response = client.chat.completions.create(
+            model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+            messages=[
+                {"role": "system", "content": "You output JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            response_format={"type": "json_object"}
+        )
+
+        formatted_content = response.parse()
+
+        return {
+            "status": "success",
+            "filename": file.filename,
+            "raw_transcript": raw_transcript,
+            "content": formatted_content
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        
+    finally:
+        # Clean up temporary video file
+        if os.path.exists(temp_video_path):
+            os.remove(temp_video_path)
