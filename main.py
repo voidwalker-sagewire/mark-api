@@ -1,8 +1,7 @@
 import os
 import shutil
 import json
-import requests
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 import whisper
 import openai
 import gspread
@@ -29,7 +28,7 @@ def get_google_sheet():
         gc = gspread.service_account_from_dict(creds_dict)
         return gc.open(sheet_name).sheet1
     except Exception as e:
-        print(f"[SHEETS] Failed to connect to Google Sheets: {e}")
+        print(f"[SHEETS] Connection error: {e}")
         return None
 
 def run_content_pipeline(video_path: str):
@@ -38,9 +37,9 @@ def run_content_pipeline(video_path: str):
     raw_transcript = result.get("text", "").strip()
 
     if not raw_transcript:
-        raise HTTPException(status_code=400, detail="No speech could be extracted from the video.")
+        raise HTTPException(status_code=400, detail="No speech extracted from video.")
 
-    print(f"[PIPELINE] Transcript extracted ({len(raw_transcript)} chars). Running LLM...")
+    print(f"[PIPELINE] Transcript generated ({len(raw_transcript)} chars). Running LLM...")
 
     prompt = f"""
     You are the content generator for a builder who speaks candidly about engineering, software, and real-world execution.
@@ -65,59 +64,38 @@ def run_content_pipeline(video_path: str):
         response_format={"type": "json_object"}
     )
 
-    raw_json_str = response.choices[0].message.content
-    formatted_content = json.loads(raw_json_str)
-
+    formatted_content = json.loads(response.choices[0].message.content)
     return raw_transcript, formatted_content
 
-def update_sheet_row(record_id: str, raw_transcript: str, summary: str, x_post: str, newsletter: str):
+def update_or_append_sheet(raw_transcript: str, summary: str, x_post: str, newsletter: str, record_id: str = None):
     sheet = get_google_sheet()
     if not sheet:
         return
 
     try:
-        print(f"[SHEETS] Searching for row with ID: {record_id}...")
-        cell = sheet.find(record_id)
-        row_num = cell.row
-
-        sheet.update_cell(row_num, 4, raw_transcript)
-        sheet.update_cell(row_num, 5, summary)
-        sheet.update_cell(row_num, 6, x_post)
-        sheet.update_cell(row_num, 7, newsletter)
-        print(f"[SHEETS] Successfully updated row {row_num}!")
+        if record_id:
+            # Find and update existing row
+            cell = sheet.find(record_id)
+            row_num = cell.row
+            sheet.update_cell(row_num, 4, raw_transcript)
+            sheet.update_cell(row_num, 5, summary)
+            sheet.update_cell(row_num, 6, x_post)
+            sheet.update_cell(row_num, 7, newsletter)
+            print(f"[SHEETS] Updated row {row_num}")
+        else:
+            # Append new row if no ID provided
+            sheet.append_row(["", "", "", raw_transcript, summary, x_post, newsletter])
+            print("[SHEETS] Appended new row")
     except Exception as e:
-        print(f"[SHEETS] Failed to update row: {e}")
+        print(f"[SHEETS] Update failed: {e}")
 
-@app.post("/process-webhook")
-async def process_webhook(request: Request):
-    temp_video_path = "/tmp/appsheet_video.mp4"
+@app.post("/process-video")
+async def process_video(file: UploadFile = File(...), record_id: str = Form(None)):
+    temp_video_path = f"/tmp/{file.filename}"
     try:
-        body = await request.json()
-        print(f"[WEBHOOK] Payload received: {body}")
-        
-        file_url = body.get("file_url", "")
-        record_id = body.get("ID", "")
-
-        if not file_url:
-            raise HTTPException(status_code=400, detail="No file_url provided in payload.")
-
-        print(f"[DOWNLOAD] Streaming video from: {file_url}")
-        
-        # Stream the download using standard requests with redirect handling
-        with requests.get(file_url, stream=True, allow_redirects=True, timeout=60) as r:
-            r.raise_for_status()
-            with open(temp_video_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-
-        file_size = os.path.getsize(temp_video_path)
-        print(f"[DOWNLOAD] Download complete. File size: {file_size} bytes")
-
-        if file_size < 5000:  # If under 5KB, it's an HTML error page, not a video
-            with open(temp_video_path, 'r', errors='ignore') as f:
-                snippet = f.read(500)
-            print(f"[ERROR] Downloaded file is too small ({file_size} bytes). Snippet:\n{snippet}")
-            raise HTTPException(status_code=400, detail=f"Downloaded invalid file. Content snippet: {snippet[:200]}")
+        print(f"[UPLOAD] Receiving local file stream: {file.filename}")
+        with open(temp_video_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
         raw_transcript, formatted_content = run_content_pipeline(temp_video_path)
 
@@ -127,8 +105,7 @@ async def process_webhook(request: Request):
         if isinstance(newsletter, dict):
             newsletter = f"{newsletter.get('title', '')}\n\n{newsletter.get('content', '')}"
 
-        if record_id:
-            update_sheet_row(record_id, raw_transcript, summary, x_post, newsletter)
+        update_or_append_sheet(raw_transcript, summary, x_post, newsletter, record_id)
 
         return {
             "status": "success",
@@ -136,7 +113,7 @@ async def process_webhook(request: Request):
             "content": formatted_content
         }
     except Exception as e:
-        print(f"[WEBHOOK ERROR] {str(e)}")
+        print(f"[ERROR] {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_video_path):
