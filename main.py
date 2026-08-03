@@ -1,10 +1,10 @@
 import os
 import shutil
 import json
+import requests
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 import whisper
 import openai
-import gdown
 import gspread
 
 app = FastAPI(title="M.A.R.K. Content Engine")
@@ -21,21 +21,27 @@ def get_google_sheet():
     sheet_name = os.getenv("GOOGLE_SHEET_NAME", "MARK")
     
     if not json_creds:
+        print("[SHEETS] GOOGLE_SERVICE_ACCOUNT_JSON is missing!")
         return None
 
-    creds_dict = json.loads(json_creds)
-    gc = gspread.service_account_from_dict(creds_dict)
-    return gc.open(sheet_name).sheet1
+    try:
+        creds_dict = json.loads(json_creds)
+        gc = gspread.service_account_from_dict(creds_dict)
+        return gc.open(sheet_name).sheet1
+    except Exception as e:
+        print(f"[SHEETS] Failed to connect to Google Sheets: {e}")
+        return None
 
 def run_content_pipeline(video_path: str):
-    # 1. Transcribe audio track via Whisper
+    print(f"[PIPELINE] Running Whisper on {video_path}...")
     result = model.transcribe(video_path)
     raw_transcript = result.get("text", "").strip()
 
     if not raw_transcript:
         raise HTTPException(status_code=400, detail="No speech could be extracted from the video.")
 
-    # 2. Generate content formats via LLM
+    print(f"[PIPELINE] Transcript extracted ({len(raw_transcript)} chars). Running LLM...")
+
     prompt = f"""
     You are the content generator for a builder who speaks candidly about engineering, software, and real-world execution.
     
@@ -67,58 +73,51 @@ def run_content_pipeline(video_path: str):
 def update_sheet_row(record_id: str, raw_transcript: str, summary: str, x_post: str, newsletter: str):
     sheet = get_google_sheet()
     if not sheet:
-        print("Google Sheets credentials not set. Skipping sheet write-back.")
         return
 
-    # Find the row matching the AppSheet record ID (Column A)
     try:
+        print(f"[SHEETS] Searching for row with ID: {record_id}...")
         cell = sheet.find(record_id)
         row_num = cell.row
 
-        # Update Raw_Transcript (Col D), Summary (Col E), X_Post (Col F), Newsletter (Col G)
         sheet.update_cell(row_num, 4, raw_transcript)
         sheet.update_cell(row_num, 5, summary)
         sheet.update_cell(row_num, 6, x_post)
         sheet.update_cell(row_num, 7, newsletter)
-        print(f"Successfully updated row {row_num} in Google Sheets!")
+        print(f"[SHEETS] Successfully updated row {row_num}!")
     except Exception as e:
-        print(f"Failed to update Google Sheet row: {e}")
+        print(f"[SHEETS] Failed to update row: {e}")
 
-# Direct File Upload Endpoint
-@app.post("/process-video")
-async def process_video(file: UploadFile = File(...)):
-    temp_video_path = f"/tmp/{file.filename}"
-    try:
-        with open(temp_video_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        raw_transcript, formatted_content = run_content_pipeline(temp_video_path)
-
-        return {
-            "status": "success",
-            "filename": file.filename,
-            "raw_transcript": raw_transcript,
-            "content": formatted_content
-        }
-    finally:
-        if os.path.exists(temp_video_path):
-            os.remove(temp_video_path)
-
-# AppSheet Webhook Endpoint
 @app.post("/process-webhook")
 async def process_webhook(request: Request):
+    temp_video_path = "/tmp/appsheet_video.mp4"
     try:
         body = await request.json()
+        print(f"[WEBHOOK] Payload received: {body}")
+        
         file_url = body.get("file_url", "")
         record_id = body.get("ID", "")
 
         if not file_url:
-            raise HTTPException(status_code=400, detail="No file_url provided in webhook payload.")
+            raise HTTPException(status_code=400, detail="No file_url provided in payload.")
 
-        temp_video_path = "/tmp/appsheet_video.mp4"
+        print(f"[DOWNLOAD] Streaming video from: {file_url}")
+        
+        # Stream the download using standard requests with redirect handling
+        with requests.get(file_url, stream=True, allow_redirects=True, timeout=60) as r:
+            r.raise_for_status()
+            with open(temp_video_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
 
-        # Download file cleanly
-        gdown.download(url=file_url, output=temp_video_path, quiet=False)
+        file_size = os.path.getsize(temp_video_path)
+        print(f"[DOWNLOAD] Download complete. File size: {file_size} bytes")
+
+        if file_size < 5000:  # If under 5KB, it's an HTML error page, not a video
+            with open(temp_video_path, 'r', errors='ignore') as f:
+                snippet = f.read(500)
+            print(f"[ERROR] Downloaded file is too small ({file_size} bytes). Snippet:\n{snippet}")
+            raise HTTPException(status_code=400, detail=f"Downloaded invalid file. Content snippet: {snippet[:200]}")
 
         raw_transcript, formatted_content = run_content_pipeline(temp_video_path)
 
@@ -128,7 +127,6 @@ async def process_webhook(request: Request):
         if isinstance(newsletter, dict):
             newsletter = f"{newsletter.get('title', '')}\n\n{newsletter.get('content', '')}"
 
-        # Write directly back to Google Sheets if an ID was passed
         if record_id:
             update_sheet_row(record_id, raw_transcript, summary, x_post, newsletter)
 
@@ -138,7 +136,8 @@ async def process_webhook(request: Request):
             "content": formatted_content
         }
     except Exception as e:
+        print(f"[WEBHOOK ERROR] {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if os.path.exists("/tmp/appsheet_video.mp4"):
-            os.remove("/tmp/appsheet_video.mp4")
+        if os.path.exists(temp_video_path):
+            os.remove(temp_video_path)
