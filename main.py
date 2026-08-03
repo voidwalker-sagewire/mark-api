@@ -85,8 +85,8 @@ async def process_webhook(request: Request):
 
         temp_video_path = "/tmp/appsheet_video.mp4"
 
-        # Download file safely bypassing Google Drive large file warnings
-        gdown.download(url=file_url, output=temp_video_path, quiet=False, fuzzy=True)
+        # Download file cleanly
+        gdown.download(url=file_url, output=temp_video_path, quiet=False)
 
         raw_transcript, formatted_content = run_content_pipeline(temp_video_path)
 
