@@ -4,6 +4,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 import whisper
@@ -11,6 +12,30 @@ import openai
 import gspread
 
 app = FastAPI(title="M.A.R.K. Content Engine")
+
+# --- BUG FIX (added 2026-08-04, patched by Claude) ---
+# WHY THIS EXISTS: mark-uploader.html is hosted on GitHub Pages
+# (voidwalker-sagewire.github.io) and calls this API on a different domain
+# (mark.sagewire.dev). Browsers block cross-origin fetch() requests by
+# default unless the server explicitly allows it via CORS headers -- this
+# is a browser security rule, not something curl/Termux ever hits (which
+# is why direct multipart uploads worked in earlier testing but the actual
+# hosted uploader page failed with "Failed to fetch"). Without this
+# middleware, FastAPI never sends the Access-Control-Allow-Origin header,
+# so the browser refuses to let the request through at all -- the request
+# never even reaches process_video(), which is why this failure mode
+# wasn't visible in any of the server-side [SHEETS]/[PIPELINE] logs.
+# allow_origins=["*"] is permissive (any site can call this API from a
+# browser) -- fine for now since this endpoint has no auth/secrets exposed
+# to the caller, but worth tightening to the specific GitHub Pages origin
+# later if this API ever handles anything sensitive.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 model = whisper.load_model("base")
 
