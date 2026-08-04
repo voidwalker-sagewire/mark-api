@@ -51,4 +51,66 @@
   the video as real multipart file bytes. AppSheet's webhook step often
   sends a file as a Drive link/reference rather than raw binary data, which
   this endpoint (`UploadFile`) would not accept as-is.
-  
+
+### 2026-08-04 — Mobile uploader client added (built by Claude)
+
+**Problem:** Two days of MARK rows (8/2–8/3, 15 entries) had valid IDs/Timestamps/Video_File
+paths — meaning AppSheet's form was creating rows correctly — but every single one had
+blank Raw_Transcript/Summary/X_Post/Newsletter. Nothing was ever calling `mark-api` to
+actually process them. Root cause: no working automated trigger existed yet.
+
+**What was built as an immediate working path:** `mark-uploader.html` — a standalone,
+single-file mobile web app. Opens the native Android media picker, uploads directly to
+`mark-api`'s `/process-video` endpoint via `fetch` + `FormData` (real multipart bytes,
+matching what the endpoint already expects), and shows a live three-stage status readout
+(upload → transcribe/LLM → sheet write) instead of a silent black box. It also directly
+surfaces the raw server response if the API ever returns non-JSON (the
+`<html>...not valid JSON` failure mode diagnosed in the PTT Field Logger session).
+
+**Deployment:** same pattern as `sagewire-dev` and other GitHub Pages sites — uploaded
+as `index.html` to its own repo, GitHub Pages enabled from `main` root. No build step,
+no server, no laptop.
+
+**Live endpoint confirmed:** `https://mark.sagewire.dev/process-video`
+
+**Now there are three intended entry points into MARK**, each solving a different use
+case:
+1. **This uploader (`mark-uploader.html`)** — real-time, single-video, immediate
+   feedback. Working now.
+2. **Termux curl one-liner** — fastest for a dev already in a terminal shell. Working
+   now (existing multipart endpoint supports it directly).
+3. **AppSheet Bot (auto-trigger on form submission)** — the "never think about it again"
+   path. Blocked on the file-format bridge described below. This was the next real task.
+
+**For Gemini / next collaborator:** don't be alarmed that route 3 (the Bot) still isn't
+wired up — that's not a regression, it never worked, and the reason is now documented
+above instead of being a mystery. The uploader in this entry is a parallel path, not a
+replacement for eventually fixing the Bot route.
+
+### 2026-08-04 (later same day) — Webhook bridge built + reconciled with Gemini's documented contract (patched by Claude)
+
+Gemini shared documentation describing a `POST /process-webhook` endpoint (JSON body:
+`{"ID": ..., "file_url": ...}`) as MARK's AppSheet integration point. **At the time that
+doc was shared, this endpoint did not exist in the repo** — verified via `git log --all`
+across every branch; only `main` exists, and no commit ever added it. This wasn't a
+mistake on Gemini's part so much as documentation written ahead of the code — worth
+naming plainly so nobody spends time hunting for a bug in an endpoint that was never
+actually deployed.
+
+**What was built to close the gap:**
+- `/process-video-url` — accepts `{"video_url": ..., "record_id": ...}`, downloads the
+  video itself, then hands off to `_process_local_file()` (the same tested pipeline
+  `/process-video` already uses).
+- `/process-webhook` — thin alias matching Gemini's exact documented field names
+  (`ID`, `file_url`), so any existing references to that contract (docs already shared,
+  any Bot config already sketched) now point at something real instead of a 404.
+
+**MARK now has three live entry points, each funneling through one shared pipeline:**
+`/process-video` (multipart, used by the uploader + Termux), `/process-video-url` and
+`/process-webhook` (JSON + URL, for AppSheet or any system that only has a file
+reference, not raw bytes).
+
+**Still unverified, same caveat as before:** whether AppSheet's stored file URLs are
+plain-GET-able by `requests.get()` or need an auth header. That's a 5-minute test against
+a real URL, not a redesign — do that before wiring an actual AppSheet Bot to
+`/process-webhook` in production.
