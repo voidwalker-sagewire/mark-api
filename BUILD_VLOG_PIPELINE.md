@@ -115,6 +115,41 @@ plain-GET-able by `requests.get()` or need an auth header. That's a 5-minute tes
 a real URL, not a redesign — do that before wiring an actual AppSheet Bot to
 `/process-webhook` in production.
 
+### 2026-08-04 (fourth pass) — Two real Google Cloud API blockers found + fixed (not code)
+
+First real end-to-end test kept returning `sheet_write_ok: false` even after all prior
+fixes. Turned out to be two separate, sequential 403 errors from Google Cloud itself, not
+`mark-api`:
+1. **Google Drive API** was never enabled on the project — gspread needs it to open a
+   spreadsheet by name even though the actual writes happen through the Sheets API.
+2. Once Drive was enabled, the **Google Sheets API** itself turned out to also be
+   disabled — same project, never enabled at all.
+
+Both fixed via Google Cloud Console (Enable API), no code changes. First fully successful
+row: `a89de2b5ff9e4474ba88220754e625db` — real transcript, summary, X post, and newsletter
+all written back to the sheet. **MARK's core pipeline is now confirmed working
+end-to-end**, from a phone, through curl, into the sheet.
+
+Note the ID format on that row is a full 32-char UUID (`uuid.uuid4().hex`) vs. the
+8-char IDs AppSheet's own `UNIQUEID()` generates on earlier rows. Cosmetic difference
+only — both are valid, unique keys.
+
+### 2026-08-04 (fifth pass) — Read endpoint + Library view added (patched by Claude)
+
+Every existing endpoint in this file writes to the sheet; nothing read from it. The
+uploader was write-only — no way to see what MARK had actually produced without opening
+the Google Sheet directly.
+
+**Added `GET /recent-content?limit=N`** — read-only, returns the most recent N rows
+(newest first) as JSON: id, timestamp, video_file, summary, x_post, newsletter, and a
+`has_content` flag so a row that failed to generate content (blank Summary) is visibly
+flagged instead of silently missing.
+
+**Added a Library tab to `mark-uploader.html`** — fetches `/recent-content` and renders
+real cards (timestamp, summary preview, a warning badge on empty rows). Tapping a card's
+ID copies it into the Record ID field on the Upload tab, for re-running/updating a
+specific row without retyping the ID by hand.
+
 ### 2026-08-04 (same day, third pass) — CORS blocking the hosted uploader (patched by Claude)
 
 First real test of `mark-uploader.html` (hosted on GitHub Pages at
