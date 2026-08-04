@@ -1,284 +1,302 @@
-import os
-import shutil
-import json
-import uuid
-from datetime import datetime, timezone
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import requests
-import whisper
-import openai
-import gspread
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>M.A.R.K. Uploader</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --panel: #141414;
+    --border: #2a2a2a;
+    --green: #22c55e;
+    --orange: #f97316;
+    --red: #ef4444;
+    --text: #e5e5e5;
+    --dim: #888;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, Roboto, "Segoe UI", sans-serif;
+    margin: 0;
+    padding: 16px;
+    max-width: 480px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 1.4rem;
+    margin: 8px 0 4px 0;
+  }
+  .subtitle {
+    color: var(--dim);
+    font-size: 0.85rem;
+    margin-bottom: 20px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--dim);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  input[type="text"] {
+    width: 100%;
+    background: #1e1e1e;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 0.95rem;
+    margin-bottom: 14px;
+  }
+  .picker-btn {
+    width: 100%;
+    padding: 16px;
+    background: #1e1e1e;
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 0.95rem;
+    text-align: center;
+    cursor: pointer;
+    margin-bottom: 14px;
+  }
+  .picker-btn.has-file {
+    border-style: solid;
+    border-color: var(--green);
+    color: var(--green);
+  }
+  input[type="file"] { display: none; }
+  .upload-btn {
+    width: 100%;
+    padding: 16px;
+    background: var(--green);
+    border: none;
+    border-radius: 10px;
+    color: #05170c;
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .upload-btn:disabled {
+    background: #333;
+    color: var(--dim);
+  }
+  .status-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    font-size: 0.85rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .status-line:last-child { border-bottom: none; }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--dim);
+    flex-shrink: 0;
+  }
+  .dot.ok { background: var(--green); }
+  .dot.warn { background: var(--orange); }
+  .dot.err { background: var(--red); }
+  #log { display: none; }
+  #log.show { display: block; }
+  .result-box {
+    background: #1e1e1e;
+    border-radius: 8px;
+    padding: 12px;
+    margin-top: 10px;
+    font-size: 0.8rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--dim);
+    max-height: 220px;
+    overflow-y: auto;
+  }
+</style>
+</head>
+<body>
 
-app = FastAPI(title="M.A.R.K. Content Engine")
+<h1>M.A.R.K. Uploader</h1>
+<div class="subtitle">Pick a video, send it straight to the content engine.</div>
 
-# --- BUG FIX (added 2026-08-04, patched by Claude) ---
-# WHY THIS EXISTS: mark-uploader.html is hosted on GitHub Pages
-# (voidwalker-sagewire.github.io) and calls this API on a different domain
-# (mark.sagewire.dev). Browsers block cross-origin fetch() requests by
-# default unless the server explicitly allows it via CORS headers -- this
-# is a browser security rule, not something curl/Termux ever hits (which
-# is why direct multipart uploads worked in earlier testing but the actual
-# hosted uploader page failed with "Failed to fetch"). Without this
-# middleware, FastAPI never sends the Access-Control-Allow-Origin header,
-# so the browser refuses to let the request through at all -- the request
-# never even reaches process_video(), which is why this failure mode
-# wasn't visible in any of the server-side [SHEETS]/[PIPELINE] logs.
-# allow_origins=["*"] is permissive (any site can call this API from a
-# browser) -- fine for now since this endpoint has no auth/secrets exposed
-# to the caller, but worth tightening to the specific GitHub Pages origin
-# later if this API ever handles anything sensitive.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+<div class="panel">
+  <label for="endpoint">API Endpoint</label>
+  <input type="text" id="endpoint" placeholder="https://mark.sagewire.dev/process-video" value="https://mark.sagewire.dev/process-video">
 
-model = whisper.load_model("base")
+  <label for="recordId">Record ID (optional — leave blank to create new)</label>
+  <input type="text" id="recordId" placeholder="e.g. df1db859">
 
-client = openai.OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-)
+  <label>Video</label>
+  <div class="picker-btn" id="pickerBtn">📹 Tap to choose a video</div>
+  <input type="file" id="fileInput" accept="video/*">
 
-def get_google_sheet():
-    json_creds = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    sheet_name = os.getenv("GOOGLE_SHEET_NAME", "MARK")
-    
-    if not json_creds:
-        print("[SHEETS] GOOGLE_SERVICE_ACCOUNT_JSON is missing!")
-        return None
+  <button class="upload-btn" id="uploadBtn" disabled>Select a video first</button>
+</div>
 
-    try:
-        creds_dict = json.loads(json_creds)
-        gc = gspread.service_account_from_dict(creds_dict)
-        return gc.open(sheet_name).sheet1
-    except Exception as e:
-        print(f"[SHEETS] Connection error: {e}")
-        return None
+<div class="panel" id="log">
+  <div class="status-line"><div class="dot" id="dotUpload"></div><span id="txtUpload">Uploading...</span></div>
+  <div class="status-line"><div class="dot" id="dotProcess"></div><span id="txtProcess">Waiting on transcription + LLM...</span></div>
+  <div class="status-line"><div class="dot" id="dotSheet"></div><span id="txtSheet">Waiting on Sheets write...</span></div>
+  <div class="result-box" id="resultBox"></div>
+</div>
 
-def run_content_pipeline(video_path: str):
-    print(f"[PIPELINE] Running Whisper on {video_path}...")
-    result = model.transcribe(video_path)
-    raw_transcript = result.get("text", "").strip()
+<script>
+  const pickerBtn = document.getElementById('pickerBtn');
+  const fileInput = document.getElementById('fileInput');
+  const uploadBtn = document.getElementById('uploadBtn');
+  const endpointInput = document.getElementById('endpoint');
+  const recordIdInput = document.getElementById('recordId');
+  const log = document.getElementById('log');
+  const resultBox = document.getElementById('resultBox');
 
-    if not raw_transcript:
-        raise HTTPException(status_code=400, detail="No speech extracted from video.")
+  let selectedFile = null;
 
-    print(f"[PIPELINE] Transcript generated ({len(raw_transcript)} chars). Running LLM...")
+  pickerBtn.addEventListener('click', () => fileInput.click());
 
-    prompt = f"""
-    You are the content generator for a builder who speaks candidly about engineering, software, and real-world execution.
-    
-    Analyze the following raw transcript from a video recording and generate three distinct outputs:
-    1. "summary": A clear 2-3 sentence executive summary in plain English explaining what was done/built so non-technical people understand it immediately.
-    2. "x_post": A short, punchy, engaging post (or short thread format) optimized for X (Twitter).
-    3. "newsletter": A well-structured section suitable for an email newsletter or blog update.
-
-    Raw Transcript:
-    "{raw_transcript}"
-
-    Return your response strictly as valid JSON with keys: "summary", "x_post", "newsletter".
-    """
-
-    response = client.chat.completions.create(
-        model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
-        messages=[
-            {"role": "system", "content": "You output JSON only."},
-            {"role": "user", "content": prompt}
-        ],
-        response_format={"type": "json_object"}
-    )
-
-    formatted_content = json.loads(response.choices[0].message.content)
-    return raw_transcript, formatted_content
-
-# --- BUG FIX (patched by Claude, session 2026-08-03) ---
-# ORIGINAL BEHAVIOR: this function returned nothing (implicit None) in every
-# case, success or failure, and the append branch wrote append_row(["", "",
-# "", raw_transcript, ...]) -- three blank strings for columns A/B/C.
-#
-# WHY THAT WAS A BUG, not just messy data:
-# The MARK AppSheet table (see MARKMobile-539435717 documentation) defines
-# column A ("ID") as the table's KEY column, with Initial Value = UNIQUEID().
-# UNIQUEID() only fires when AppSheet itself creates the row through its own
-# Add/Form action. It does NOT fire when a row is inserted from outside the
-# app (e.g. this API writing directly to the sheet via gspread). So any row
-# created by the append branch got a permanently blank key column.
-# Consequence: that row has no identity AppSheet can reference. It can't be
-# targeted by a later record_id update (sheet.find(record_id) has nothing to
-# match), Edit/Delete actions tied to the key may misbehave, and the row's
-# Video_File (col C) was also blanked, so it shows no thumbnail in the Card
-# Deck view. In short: content generated via append was silently orphaned.
-#
-# THE FIX:
-# 1. Always generate an ID and Timestamp ourselves on append, so the row is
-#    never missing its key -- mirrors what UNIQUEID()/NOW() would have done
-#    if AppSheet had created the row itself.
-# 2. Return a bool so the caller (process_video) knows whether the sheet
-#    write actually succeeded, instead of assuming success unconditionally.
-# 3. Re-raise write failures instead of only printing them, so a failed
-#    Google Sheets write is no longer invisible to whoever/whatever called
-#    this API (including an AppSheet Automation/Bot, if one is wired up to
-#    call this endpoint -- see BUILD_VLOG_PIPELINE.md bug-fix log entry).
-#
-# NOTE for Gemini / next collaborator: Video_File (col C) is still left
-# blank on the append path. That's not an oversight -- this API only ever
-# receives a temp local file (saved to /tmp, deleted in the `finally` block
-# of process_video), never a Drive/Sheets-hosted URL, so there's nothing
-# valid to put in that cell yet. If you want Video_File populated on
-# API-created rows, this function needs a video upload/hosting step first
-# (e.g. push to Drive via a service account, then write the resulting URL).
-# --- END NOTE ---
-def update_or_append_sheet(raw_transcript: str, summary: str, x_post: str, newsletter: str, record_id: str = None) -> bool:
-    sheet = get_google_sheet()
-    if not sheet:
-        print("[SHEETS] No sheet handle -- write skipped.")
-        return False
-
-    try:
-        if record_id:
-            # Find and update existing row
-            cell = sheet.find(record_id)
-            row_num = cell.row
-            sheet.update_cell(row_num, 4, raw_transcript)
-            sheet.update_cell(row_num, 5, summary)
-            sheet.update_cell(row_num, 6, x_post)
-            sheet.update_cell(row_num, 7, newsletter)
-            print(f"[SHEETS] Updated row {row_num}")
-        else:
-            # Append new row -- generate ID/Timestamp ourselves so the key
-            # column is never blank (see fix note above).
-            new_id = uuid.uuid4().hex
-            timestamp = datetime.now(timezone.utc).isoformat()
-            sheet.append_row([new_id, timestamp, "", raw_transcript, summary, x_post, newsletter])
-            print(f"[SHEETS] Appended new row with ID {new_id}")
-        return True
-    except Exception as e:
-        print(f"[SHEETS] Update failed: {e}")
-        return False
-
-# --- SHARED PIPELINE (factored out 2026-08-04, patched by Claude) ---
-# Both entry points below (direct upload, and the new URL-based bridge)
-# funnel through this exact same function once they have a local file on
-# disk. This matters for trust: the URL-based endpoint isn't a separate,
-# untested code path -- it's the same tested transcription/LLM/sheet logic
-# as the working uploader, just with a different way of getting the video
-# onto disk first. If one works, the other's pipeline is proven too; the
-# only new surface area to debug is the download step itself.
-def _process_local_file(temp_video_path: str, record_id: str = None) -> dict:
-    raw_transcript, formatted_content = run_content_pipeline(temp_video_path)
-
-    summary = formatted_content.get("summary", "")
-    x_post = formatted_content.get("x_post", "")
-    newsletter = formatted_content.get("newsletter", "")
-    if isinstance(newsletter, dict):
-        newsletter = f"{newsletter.get('title', '')}\n\n{newsletter.get('content', '')}"
-
-    sheet_write_ok = update_or_append_sheet(raw_transcript, summary, x_post, newsletter, record_id)
-
-    return {
-        "status": "success" if sheet_write_ok else "partial_success",
-        "sheet_write_ok": sheet_write_ok,
-        "raw_transcript": raw_transcript,
-        "content": formatted_content
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files.length > 0) {
+      selectedFile = fileInput.files[0];
+      pickerBtn.textContent = `✅ ${selectedFile.name}`;
+      pickerBtn.classList.add('has-file');
+      uploadBtn.disabled = false;
+      uploadBtn.textContent = 'Send to M.A.R.K.';
     }
+  });
 
-@app.post("/process-video")
-async def process_video(file: UploadFile = File(...), record_id: str = Form(None)):
-    temp_video_path = f"/tmp/{file.filename}"
-    try:
-        print(f"[UPLOAD] Receiving local file stream: {file.filename}")
-        with open(temp_video_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+  function setDot(id, state) {
+    document.getElementById(id).className = 'dot ' + state;
+  }
 
-        return _process_local_file(temp_video_path, record_id)
-    except Exception as e:
-        print(f"[ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if os.path.exists(temp_video_path):
-            os.remove(temp_video_path)
+  uploadBtn.addEventListener('click', async () => {
+    const endpoint = endpointInput.value.trim();
+    if (!endpoint) {
+      alert('Enter the API endpoint first (ask Claude/check your Coolify deployment for the public URL).');
+      return;
+    }
+    if (!selectedFile) return;
 
-# --- NEW ENDPOINT (added 2026-08-04, patched by Claude) ---
-# WHY THIS EXISTS: /process-video above requires actual multipart file
-# bytes (an UploadFile). That works fine for a client that has the raw
-# video on-device (the mobile uploader app, Termux/curl). It does NOT work
-# for an AppSheet Automation/Bot, because AppSheet's "Call a webhook" step
-# sends an uploaded file as a stored file path/URL reference, not as raw
-# multipart bytes -- see MARK sheet's Video_File column, values like
-# "MARK_Files_/66f50c0c.Video_File.190348.mp4". There was no way for the
-# Bot to actually hand this API a real video before now, which is the real
-# reason two days of AppSheet-submitted rows (8/2-8/3) never got processed
-# -- not a bug in the processing logic itself, a missing bridge to it.
-#
-# WHAT THIS ENDPOINT DOES: accepts a JSON body with a video URL instead of
-# raw bytes, downloads it to /tmp itself, then hands off to the exact same
-# _process_local_file() the working upload path already uses.
-#
-# NOT YET VERIFIED (flagging honestly for Gemini / next collaborator):
-# whether AppSheet's stored file URLs are directly downloadable with a plain
-# GET request, or whether they require an auth header / signed URL / Google
-# Drive API call instead. That depends on how MARK's cloud storage is
-# configured (Google Sheets-attached storage vs. a separate Drive folder).
-# If a plain `requests.get()` below 401s or 403s, the fix is almost
-# certainly adding an Authorization header here using the same Google
-# service account credentials already loaded in get_google_sheet() --
-# but that needs to be confirmed against a real URL before assuming it,
-# not guessed at. Test with one real Video_File URL before wiring an
-# AppSheet Bot to call this in production.
-class VideoUrlRequest(BaseModel):
-    video_url: str
-    record_id: str = None
+    uploadBtn.disabled = true;
+    uploadBtn.textContent = 'Working...';
+    log.classList.add('show');
+    resultBox.textContent = '';
+    setDot('dotUpload', 'warn');
+    setDot('dotProcess', '');
+    setDot('dotSheet', '');
+    document.getElementById('txtUpload').textContent = 'Uploading video...';
+    document.getElementById('txtProcess').textContent = 'Waiting on transcription + LLM...';
+    document.getElementById('txtSheet').textContent = 'Waiting on Sheets write...';
 
-@app.post("/process-video-url")
-async def process_video_url(payload: VideoUrlRequest):
-    temp_video_path = f"/tmp/{uuid.uuid4().hex}.mp4"
-    try:
-        print(f"[DOWNLOAD] Fetching video from URL: {payload.video_url}")
-        resp = requests.get(payload.video_url, stream=True, timeout=60)
-        resp.raise_for_status()
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+    const recordId = recordIdInput.value.trim();
+    if (recordId) formData.append('record_id', recordId);
 
-        with open(temp_video_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+    // --- DEBUG LOGGING (added 2026-08-04, patched by Claude) ---
+    // "Failed to fetch" alone doesn't say WHY -- CORS block, DNS failure,
+    // and a proxy timing out the connection all produce that exact same
+    // message with zero extra detail. The two things that actually
+    // distinguish them are (1) elapsed time before failure, and (2) the
+    // real error object's .name/.message, which the old catch block threw
+    // away. A live ticking timer + an AbortController with a generous
+    // ceiling gives us both: near-instant failure = CORS/DNS/cert issue,
+    // long wait then abort = proxy or server timing the request out.
+    const startTime = Date.now();
+    let elapsedTimer = null;
+    const updateElapsed = () => {
+      const secs = ((Date.now() - startTime) / 1000).toFixed(1);
+      document.getElementById('txtUpload').textContent = `Uploading video... (${secs}s elapsed)`;
+    };
+    elapsedTimer = setInterval(updateElapsed, 500);
 
-        print(f"[DOWNLOAD] Saved to {temp_video_path}, size={os.path.getsize(temp_video_path)} bytes")
-        return _process_local_file(temp_video_path, payload.record_id)
-    except requests.exceptions.RequestException as e:
-        # Downloading the video failed -- almost certainly the auth/access
-        # question flagged in the note above, not a transcription problem.
-        print(f"[DOWNLOAD ERROR] {str(e)}")
-        raise HTTPException(status_code=502, detail=f"Could not download video from URL: {str(e)}")
-    except Exception as e:
-        print(f"[ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if os.path.exists(temp_video_path):
-            os.remove(temp_video_path)
+    const controller = new AbortController();
+    const timeoutMs = 120000; // 2 minutes -- generous ceiling for CPU-based Whisper transcription
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-# --- ALIAS ENDPOINT (added 2026-08-04, patched by Claude) ---
-# WHY THIS EXISTS: this project has two AI collaborators (Gemini and
-# Claude) working across sessions. Gemini documented a webhook contract
-# for Mike -- POST /process-webhook, JSON body {"ID": ..., "file_url":
-# ...} -- as the intended AppSheet integration point. At the time that
-# documentation was written, this endpoint did NOT exist in the repo
-# (verified via `git log --all` -- no commit ever added it, only one
-# branch exists). Rather than leave two different endpoint contracts
-# (this one's /process-video-url above, and Gemini's documented
-# /process-webhook) both floating around unreconciled, this alias makes
-# Gemini's documented contract the real, working one. It's a thin
-# wrapper: same field meanings (ID = record_id, file_url = video_url),
-# same underlying pipeline, just the field names Gemini already told
-# Mike to expect. If Gemini or a future session references
-# /process-webhook, this is why it now actually works.
-class WebhookRequest(BaseModel):
-    ID: str = None
-    file_url: str
+    try {
+      setDot('dotProcess', 'warn');
+      document.getElementById('txtProcess').textContent = 'Transcribing + generating content (this can take a bit)...';
 
-@app.post("/process-webhook")
-async def process_webhook(payload: WebhookRequest):
-    return await process_video_url(VideoUrlRequest(video_url=payload.file_url, record_id=payload.ID))
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        body: formData,
+        signal: controller.signal
+      });
+
+      clearInterval(elapsedTimer);
+      clearTimeout(timeoutId);
+      const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+
+      setDot('dotUpload', 'ok');
+      document.getElementById('txtUpload').textContent = `Video uploaded (${elapsedSec}s)`;
+
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        // This is exactly the "<html>...not valid JSON" failure mode
+        const raw = await res.text();
+        setDot('dotProcess', 'err');
+        document.getElementById('txtProcess').textContent = `Server did not return JSON (status ${res.status})`;
+        resultBox.textContent = `HTTP ${res.status} ${res.statusText}\n\n${raw.slice(0, 500)}`;
+        uploadBtn.disabled = false;
+        uploadBtn.textContent = 'Try again';
+        return;
+      }
+
+      const data = await res.json();
+      setDot('dotProcess', 'ok');
+      document.getElementById('txtProcess').textContent = 'Transcript + content generated';
+
+      if (data.status === 'success') {
+        setDot('dotSheet', 'ok');
+        document.getElementById('txtSheet').textContent = 'Written to Google Sheet';
+      } else if (data.status === 'partial_success') {
+        setDot('dotSheet', 'err');
+        document.getElementById('txtSheet').textContent = 'Sheet write FAILED (content was generated but not saved)';
+      } else {
+        setDot('dotSheet', 'warn');
+        document.getElementById('txtSheet').textContent = 'Unknown status: ' + data.status;
+      }
+
+      resultBox.textContent = JSON.stringify(data, null, 2);
+      uploadBtn.disabled = false;
+      uploadBtn.textContent = 'Send another';
+
+    } catch (err) {
+      clearInterval(elapsedTimer);
+      clearTimeout(timeoutId);
+      const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+
+      setDot('dotUpload', 'err');
+
+      if (err.name === 'AbortError') {
+        // We hit our own 2-minute ceiling -- the request never got a
+        // response at all. This is the timeout signature: long wait,
+        // then nothing. Points at a proxy/server timeout, not CORS.
+        document.getElementById('txtUpload').textContent = `Timed out after ${elapsedSec}s -- no response from server`;
+        resultBox.textContent = `TIMEOUT after ${elapsedSec}s.\n\nThe request was sent but never got a response before hitting the ${timeoutMs/1000}s client-side limit. This usually means a reverse proxy (Traefik, Cloudflare, etc.) in front of the API is killing the connection before Whisper transcription finishes -- not a CORS or code problem.`;
+      } else {
+        // Fast failure (check the elapsed seconds above/below) usually
+        // means CORS, DNS, a bad URL, or a TLS/cert problem -- something
+        // that fails before any real network round-trip happens.
+        document.getElementById('txtUpload').textContent = `Failed after ${elapsedSec}s: ${err.name}`;
+        resultBox.textContent = `ERROR after ${elapsedSec}s\n\nName: ${err.name}\nMessage: ${err.message}\n\nIf this failed in well under a second, it's almost always CORS, a DNS/typo issue in the endpoint URL, or a TLS/certificate problem -- not a timeout. If you're testing this on GitHub Pages (https) make sure the API endpoint above also starts with https:// exactly.`;
+      }
+
+      uploadBtn.disabled = false;
+      uploadBtn.textContent = 'Try again';
+    }
+  });
+</script>
+
+</body>
+</html>
