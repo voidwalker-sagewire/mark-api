@@ -4,6 +4,8 @@ import json
 import uuid
 from datetime import datetime, timezone
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from pydantic import BaseModel
+import requests
 import whisper
 import openai
 import gspread
@@ -134,6 +136,32 @@ def update_or_append_sheet(raw_transcript: str, summary: str, x_post: str, newsl
         print(f"[SHEETS] Update failed: {e}")
         return False
 
+# --- SHARED PIPELINE (factored out 2026-08-04, patched by Claude) ---
+# Both entry points below (direct upload, and the new URL-based bridge)
+# funnel through this exact same function once they have a local file on
+# disk. This matters for trust: the URL-based endpoint isn't a separate,
+# untested code path -- it's the same tested transcription/LLM/sheet logic
+# as the working uploader, just with a different way of getting the video
+# onto disk first. If one works, the other's pipeline is proven too; the
+# only new surface area to debug is the download step itself.
+def _process_local_file(temp_video_path: str, record_id: str = None) -> dict:
+    raw_transcript, formatted_content = run_content_pipeline(temp_video_path)
+
+    summary = formatted_content.get("summary", "")
+    x_post = formatted_content.get("x_post", "")
+    newsletter = formatted_content.get("newsletter", "")
+    if isinstance(newsletter, dict):
+        newsletter = f"{newsletter.get('title', '')}\n\n{newsletter.get('content', '')}"
+
+    sheet_write_ok = update_or_append_sheet(raw_transcript, summary, x_post, newsletter, record_id)
+
+    return {
+        "status": "success" if sheet_write_ok else "partial_success",
+        "sheet_write_ok": sheet_write_ok,
+        "raw_transcript": raw_transcript,
+        "content": formatted_content
+    }
+
 @app.post("/process-video")
 async def process_video(file: UploadFile = File(...), record_id: str = Form(None)):
     temp_video_path = f"/tmp/{file.filename}"
@@ -142,28 +170,90 @@ async def process_video(file: UploadFile = File(...), record_id: str = Form(None
         with open(temp_video_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        raw_transcript, formatted_content = run_content_pipeline(temp_video_path)
-
-        summary = formatted_content.get("summary", "")
-        x_post = formatted_content.get("x_post", "")
-        newsletter = formatted_content.get("newsletter", "")
-        if isinstance(newsletter, dict):
-            newsletter = f"{newsletter.get('title', '')}\n\n{newsletter.get('content', '')}"
-
-        # BUG FIX: previously this call's result was discarded, so the
-        # response below always claimed "status": "success" even when the
-        # Google Sheets write failed. Now we surface the real outcome.
-        sheet_write_ok = update_or_append_sheet(raw_transcript, summary, x_post, newsletter, record_id)
-
-        return {
-            "status": "success" if sheet_write_ok else "partial_success",
-            "sheet_write_ok": sheet_write_ok,
-            "raw_transcript": raw_transcript,
-            "content": formatted_content
-        }
+        return _process_local_file(temp_video_path, record_id)
     except Exception as e:
         print(f"[ERROR] {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_video_path):
             os.remove(temp_video_path)
+
+# --- NEW ENDPOINT (added 2026-08-04, patched by Claude) ---
+# WHY THIS EXISTS: /process-video above requires actual multipart file
+# bytes (an UploadFile). That works fine for a client that has the raw
+# video on-device (the mobile uploader app, Termux/curl). It does NOT work
+# for an AppSheet Automation/Bot, because AppSheet's "Call a webhook" step
+# sends an uploaded file as a stored file path/URL reference, not as raw
+# multipart bytes -- see MARK sheet's Video_File column, values like
+# "MARK_Files_/66f50c0c.Video_File.190348.mp4". There was no way for the
+# Bot to actually hand this API a real video before now, which is the real
+# reason two days of AppSheet-submitted rows (8/2-8/3) never got processed
+# -- not a bug in the processing logic itself, a missing bridge to it.
+#
+# WHAT THIS ENDPOINT DOES: accepts a JSON body with a video URL instead of
+# raw bytes, downloads it to /tmp itself, then hands off to the exact same
+# _process_local_file() the working upload path already uses.
+#
+# NOT YET VERIFIED (flagging honestly for Gemini / next collaborator):
+# whether AppSheet's stored file URLs are directly downloadable with a plain
+# GET request, or whether they require an auth header / signed URL / Google
+# Drive API call instead. That depends on how MARK's cloud storage is
+# configured (Google Sheets-attached storage vs. a separate Drive folder).
+# If a plain `requests.get()` below 401s or 403s, the fix is almost
+# certainly adding an Authorization header here using the same Google
+# service account credentials already loaded in get_google_sheet() --
+# but that needs to be confirmed against a real URL before assuming it,
+# not guessed at. Test with one real Video_File URL before wiring an
+# AppSheet Bot to call this in production.
+class VideoUrlRequest(BaseModel):
+    video_url: str
+    record_id: str = None
+
+@app.post("/process-video-url")
+async def process_video_url(payload: VideoUrlRequest):
+    temp_video_path = f"/tmp/{uuid.uuid4().hex}.mp4"
+    try:
+        print(f"[DOWNLOAD] Fetching video from URL: {payload.video_url}")
+        resp = requests.get(payload.video_url, stream=True, timeout=60)
+        resp.raise_for_status()
+
+        with open(temp_video_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        print(f"[DOWNLOAD] Saved to {temp_video_path}, size={os.path.getsize(temp_video_path)} bytes")
+        return _process_local_file(temp_video_path, payload.record_id)
+    except requests.exceptions.RequestException as e:
+        # Downloading the video failed -- almost certainly the auth/access
+        # question flagged in the note above, not a transcription problem.
+        print(f"[DOWNLOAD ERROR] {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Could not download video from URL: {str(e)}")
+    except Exception as e:
+        print(f"[ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(temp_video_path):
+            os.remove(temp_video_path)
+
+# --- ALIAS ENDPOINT (added 2026-08-04, patched by Claude) ---
+# WHY THIS EXISTS: this project has two AI collaborators (Gemini and
+# Claude) working across sessions. Gemini documented a webhook contract
+# for Mike -- POST /process-webhook, JSON body {"ID": ..., "file_url":
+# ...} -- as the intended AppSheet integration point. At the time that
+# documentation was written, this endpoint did NOT exist in the repo
+# (verified via `git log --all` -- no commit ever added it, only one
+# branch exists). Rather than leave two different endpoint contracts
+# (this one's /process-video-url above, and Gemini's documented
+# /process-webhook) both floating around unreconciled, this alias makes
+# Gemini's documented contract the real, working one. It's a thin
+# wrapper: same field meanings (ID = record_id, file_url = video_url),
+# same underlying pipeline, just the field names Gemini already told
+# Mike to expect. If Gemini or a future session references
+# /process-webhook, this is why it now actually works.
+class WebhookRequest(BaseModel):
+    ID: str = None
+    file_url: str
+
+@app.post("/process-webhook")
+async def process_webhook(payload: WebhookRequest):
+    return await process_video_url(VideoUrlRequest(video_url=payload.file_url, record_id=payload.ID))
