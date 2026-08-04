@@ -114,3 +114,18 @@ reference, not raw bytes).
 plain-GET-able by `requests.get()` or need an auth header. That's a 5-minute test against
 a real URL, not a redesign — do that before wiring an actual AppSheet Bot to
 `/process-webhook` in production.
+
+### 2026-08-04 (same day, third pass) — CORS blocking the hosted uploader (patched by Claude)
+
+First real test of `mark-uploader.html` (hosted on GitHub Pages at
+`voidwalker-sagewire.github.io`) against the live API failed with `Request failed:
+Failed to fetch` before the request even reached the server — nothing showed up in the
+`[SHEETS]`/`[PIPELINE]` logs at all, which was the tell. **Root cause:** the API had no
+CORS configuration, so the browser blocked the cross-origin request outright (GitHub
+Pages domain calling `mark.sagewire.dev` — a different origin). This is a browser-only
+rule; it's why curl and Termux testing never hit this, and it's why the failure was
+invisible server-side — the request never arrived.
+
+**Fix:** added `CORSMiddleware` with `allow_origins=["*"]`. Permissive for now since this
+endpoint doesn't expose secrets to the caller; worth narrowing to the specific GitHub
+Pages origin later if that changes.
