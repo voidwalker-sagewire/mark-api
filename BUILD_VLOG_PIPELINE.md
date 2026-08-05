@@ -161,6 +161,32 @@ Android share sheet (X app, Notes, Messages, whatever's installed) — no
 copy-then-switch-apps-then-paste round trip required. Card ID tap-to-reuse (for
 re-running/updating a specific row) is unchanged.
 
+### 2026-08-04 (seventh pass) — Library had no loading feedback or timeout (patched by Claude)
+
+`loadLibrary()` showed a static "Loading..." string with no spinner and, critically, no
+timeout on the fetch itself -- a slow `/recent-content` response (cold container, large
+sheet, gspread being sluggish) or a genuine hang looked identical to "still working,"
+with no way to tell them apart. Same root issue as the original upload button before its
+debug-logging pass earlier this session. **Fix:** added a real spinner with a live
+elapsed-time counter, plus a 20-second `AbortController` ceiling -- a hang now fails
+visibly with a clear timeout message instead of spinning forever.
+
+### 2026-08-04 (eighth pass) — Google Drive downloads needed gdown, not plain requests (patched by Claude)
+
+Testing `/process-video-url` against a real AppSheet-stored video (confirmed to live in
+Google Drive, in an auto-created `MARK_Files_` folder inside the app's Drive space --
+Mike didn't set this up manually, AppSheet does it automatically) failed with ffmpeg
+erroring `moov atom not found`. Root cause: `requests.get()` on a `drive.google.com/uc?...`
+link returns Google's HTML virus-scan interstitial page for larger files, not the actual
+video bytes -- ffmpeg was trying to decode an HTML page saved with a `.mp4` extension.
+Neither the static `&confirm=t` trick nor Google's newer `drive.usercontent.google.com`
+endpoint solved it; both need a token Google generates per-request, not a static one.
+
+**Fix:** `gdown` — already sitting unused in `requirements.txt` — handles this
+confirmation-token flow automatically. `/process-video-url` now detects Drive URLs and
+routes them through `gdown.download(..., fuzzy=True)` instead of `requests.get()`;
+non-Drive URLs still use the original plain-GET path unchanged.
+
 ### 2026-08-04 (same day, third pass) — CORS blocking the hosted uploader (patched by Claude)
 
 First real test of `mark-uploader.html` (hosted on GitHub Pages at
