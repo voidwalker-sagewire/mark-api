@@ -150,6 +150,17 @@ real cards (timestamp, summary preview, a warning badge on empty rows). Tapping 
 ID copies it into the Record ID field on the Upload tab, for re-running/updating a
 specific row without retyping the ID by hand.
 
+### 2026-08-04 (sixth pass) — Cards made expandable with Copy/Share per field (patched by Claude)
+
+First real use surfaced the actual gap: the Library showed content existed but gave no
+way to get it out and post it anywhere. Fix: tapping a card's summary now expands it to
+show all three generated fields (Summary, X Post, Newsletter) in full, each with its own
+**Copy** button (clipboard) and, where the browser supports it (`navigator.share` —
+most Android browsers), a **Share** button that hands the text straight to the native
+Android share sheet (X app, Notes, Messages, whatever's installed) — no
+copy-then-switch-apps-then-paste round trip required. Card ID tap-to-reuse (for
+re-running/updating a specific row) is unchanged.
+
 ### 2026-08-04 (same day, third pass) — CORS blocking the hosted uploader (patched by Claude)
 
 First real test of `mark-uploader.html` (hosted on GitHub Pages at
