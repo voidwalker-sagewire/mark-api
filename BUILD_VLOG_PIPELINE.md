@@ -218,6 +218,31 @@ instead of silently letting everything through.
 protecting these endpoints — no rate limiting, no per-user keys, no rotation. Fine for
 "nobody else knows about this yet," worth revisiting before any real audience arrives.
 
+### 2026-08-05 — Uploader's own 120s timeout was too short for longer videos (patched by Claude)
+
+First real test with a longer video (2:15) hit "Timed out after 120.0s" in the uploader.
+This was **not** a repeat of the earlier proxy/TLS issues from the previous session --
+no connection reset, just the uploader's own client-side `AbortController` giving up on
+schedule at a number (120s) that was a guess, not a measurement, made when only
+short (<1 min) clips had been tested. CPU-based Whisper transcription time scales
+roughly with video length on top of upload time for a larger file -- a fixed short
+ceiling was always going to eventually be too small once someone uploaded something
+longer.
+
+**Fix:** raised the client-side timeout to 10 minutes (also a rough ceiling, not a
+measured one) and corrected the timeout error message, which previously pointed
+confidently at "a reverse proxy is killing the connection" -- that was speculation
+carried over from a different failure mode earlier in the project, not necessarily
+true here. The message now tells whoever hits this to check `mark-api`'s Coolify logs
+for a `[PIPELINE]` line timestamped after the client gave up, which would confirm the
+server was still working the whole time -- that's the fast way to tell "video is just
+long" apart from "something's actually broken," instead of guessing.
+
+**Still open, flagged honestly:** if a legitimately long video times out even at the new
+10-minute ceiling, the real fix isn't raising the number a third time -- it's adding a
+way to see real progress (e.g. a status-polling endpoint) instead of a single blocking
+request with a guessed-at deadline.
+
 ### 2026-08-04 (same day, third pass) — CORS blocking the hosted uploader (patched by Claude)
 
 First real test of `mark-uploader.html` (hosted on GitHub Pages at
