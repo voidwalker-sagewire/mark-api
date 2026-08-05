@@ -187,6 +187,37 @@ confirmation-token flow automatically. `/process-video-url` now detects Drive UR
 routes them through `gdown.download(..., fuzzy=True)` instead of `requests.get()`;
 non-Drive URLs still use the original plain-GET path unchanged.
 
+### 2026-08-04 (ninth pass) — API key authentication added (patched by Claude)
+
+Both `mark-api` and `mark-uploader` are **public GitHub repositories**. Every endpoint
+(`/process-video`, `/process-video-url`, `/process-webhook`, `/recent-content`) had zero
+authentication until now — anyone who found `mark.sagewire.dev` (a public, indexable
+domain, no secret in it) could burn OpenAI quota, spam the sheet, or read every
+transcript/summary via `/recent-content`. "Nobody knows this URL exists" stopped being
+real security the moment the repo (and therefore the domain referenced in it) went
+public.
+
+**How it works:** every protected endpoint now requires a header `X-API-Key: <key>`,
+checked against a `MARK_API_KEY` environment variable — same pattern as
+`OPENAI_API_KEY`, never hardcoded in the file, never committed. **Fails closed**: if
+`MARK_API_KEY` isn't set on the server at all, every request is refused with a 500
+instead of silently letting everything through.
+
+**Setup required before this works (not automatic):**
+1. In Coolify → `mark-api` → Configuration → Environment Variables, add `MARK_API_KEY`
+   set to any long random string you generate.
+2. Redeploy so the container picks it up.
+3. In `mark-uploader.html`, paste that same value into the new **API Key** field. It is
+   NOT hardcoded into the file (that file is public — hardcoding it would defeat the
+   whole point), so it needs to be pasted in each time the page loads fresh, same as the
+   endpoint URL.
+4. If/when the AppSheet Bot route to `/process-webhook` gets wired up, its webhook step
+   needs an `X-API-Key` custom header added too, or it will get a 401.
+
+**Not done in this pass, worth knowing:** the key is currently the *only* thing
+protecting these endpoints — no rate limiting, no per-user keys, no rotation. Fine for
+"nobody else knows about this yet," worth revisiting before any real audience arrives.
+
 ### 2026-08-04 (same day, third pass) — CORS blocking the hosted uploader (patched by Claude)
 
 First real test of `mark-uploader.html` (hosted on GitHub Pages at
