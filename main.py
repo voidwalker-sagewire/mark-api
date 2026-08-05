@@ -7,6 +7,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
+import gdown
 import whisper
 import openai
 import gspread
@@ -219,17 +220,18 @@ async def process_video(file: UploadFile = File(...), record_id: str = Form(None
 # raw bytes, downloads it to /tmp itself, then hands off to the exact same
 # _process_local_file() the working upload path already uses.
 #
-# NOT YET VERIFIED (flagging honestly for Gemini / next collaborator):
-# whether AppSheet's stored file URLs are directly downloadable with a plain
-# GET request, or whether they require an auth header / signed URL / Google
-# Drive API call instead. That depends on how MARK's cloud storage is
-# configured (Google Sheets-attached storage vs. a separate Drive folder).
-# If a plain `requests.get()` below 401s or 403s, the fix is almost
-# certainly adding an Authorization header here using the same Google
-# service account credentials already loaded in get_google_sheet() --
-# but that needs to be confirmed against a real URL before assuming it,
-# not guessed at. Test with one real Video_File URL before wiring an
-# AppSheet Bot to call this in production.
+# NOW VERIFIED (2026-08-04, patched by Claude): AppSheet's stored files
+# turned out to live in the app's own Google Drive folder (auto-created by
+# AppSheet, not something Mike set up manually -- see "MARK_Files_" folder
+# under the app's default Drive folder). A plain `requests.get()` on a
+# drive.google.com/uc?... link works for small files, but Google requires
+# a dynamically-generated confirmation token for larger ones -- a static
+# `&confirm=t` trick doesn't satisfy it. Both failed the same way: ffmpeg
+# choked with "moov atom not found" because it received Google's HTML
+# virus-scan interstitial page saved with a .mp4 extension, not real video
+# bytes. Fixed below using `gdown` (already in requirements.txt, never
+# actually wired into this file until now) -- it handles Drive's
+# confirmation-token flow automatically instead of guessing at URL tricks.
 class VideoUrlRequest(BaseModel):
     video_url: str
     record_id: str = None
@@ -238,13 +240,21 @@ class VideoUrlRequest(BaseModel):
 async def process_video_url(payload: VideoUrlRequest):
     temp_video_path = f"/tmp/{uuid.uuid4().hex}.mp4"
     try:
-        print(f"[DOWNLOAD] Fetching video from URL: {payload.video_url}")
-        resp = requests.get(payload.video_url, stream=True, timeout=60)
-        resp.raise_for_status()
-
-        with open(temp_video_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+        if "drive.google.com" in payload.video_url or "drive.usercontent.google.com" in payload.video_url:
+            print(f"[DOWNLOAD] Google Drive URL detected, using gdown: {payload.video_url}")
+            result = gdown.download(payload.video_url, temp_video_path, quiet=False, fuzzy=True)
+            if result is None or not os.path.exists(temp_video_path) or os.path.getsize(temp_video_path) == 0:
+                raise HTTPException(
+                    status_code=502,
+                    detail="gdown could not download the Drive file. Check that sharing is set to 'Anyone with the link' and the file ID is correct."
+                )
+        else:
+            print(f"[DOWNLOAD] Fetching video from URL: {payload.video_url}")
+            resp = requests.get(payload.video_url, stream=True, timeout=60)
+            resp.raise_for_status()
+            with open(temp_video_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
 
         print(f"[DOWNLOAD] Saved to {temp_video_path}, size={os.path.getsize(temp_video_path)} bytes")
         return _process_local_file(temp_video_path, payload.record_id)
