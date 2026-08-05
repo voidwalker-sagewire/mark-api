@@ -3,7 +3,7 @@ import shutil
 import json
 import uuid
 from datetime import datetime, timezone
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
@@ -27,9 +27,12 @@ app = FastAPI(title="M.A.R.K. Content Engine")
 # never even reaches process_video(), which is why this failure mode
 # wasn't visible in any of the server-side [SHEETS]/[PIPELINE] logs.
 # allow_origins=["*"] is permissive (any site can call this API from a
-# browser) -- fine for now since this endpoint has no auth/secrets exposed
-# to the caller, but worth tightening to the specific GitHub Pages origin
-# later if this API ever handles anything sensitive.
+# browser). This used to be justified by "no secrets exposed to the
+# caller" -- that stopped being true once real API-key auth was added
+# below, but CORS and auth are separate layers on purpose: CORS controls
+# which *websites* can call this from a browser, the API key controls
+# *who* can call it at all (browser, curl, Termux, anything). Loosening
+# CORS doesn't bypass the key check.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,6 +40,42 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- SECURITY FIX (added 2026-08-04, patched by Claude) ---
+# WHY THIS EXISTS: both mark-api and mark-uploader are public repositories.
+# Before this, every endpoint here (/process-video, /process-video-url,
+# /process-webhook, /recent-content) had zero authentication -- anyone who
+# found mark.sagewire.dev (a public, indexable URL, no secret in it) could
+# burn the OpenAI quota, spam the sheet with junk rows, or read every
+# transcript/summary via /recent-content. Nothing in the code itself was
+# ever the problem; the problem was that "nobody knows this URL exists" is
+# not real security once the repo (and therefore the domain) is public.
+#
+# HOW IT WORKS: every protected request must send a header
+# `X-API-Key: <the real key>`, checked against MARK_API_KEY set as an
+# environment variable in Coolify (same pattern as OPENAI_API_KEY and
+# GOOGLE_SERVICE_ACCOUNT_JSON below -- never hardcoded in this file, never
+# committed to the public repo).
+#
+# This deliberately fails CLOSED, not open: if MARK_API_KEY isn't set on
+# the server at all, every request is refused with a 500 rather than
+# silently letting everything through. A misconfigured server should be
+# loud and broken, not quietly wide open.
+#
+# TODO for whoever deploys this: set MARK_API_KEY in Coolify's environment
+# variables for mark-api (Configuration -> Environment Variables), then
+# use that same value in mark-uploader.html's new API Key field, and as a
+# custom header on the AppSheet Bot's webhook step if/when that gets wired
+# up to /process-webhook.
+MARK_API_KEY = os.getenv("MARK_API_KEY")
+
+def verify_api_key(x_api_key: str = Header(None)):
+    if not MARK_API_KEY:
+        print("[SECURITY] MARK_API_KEY is not set on the server -- refusing all requests until it is configured.")
+        raise HTTPException(status_code=500, detail="Server misconfigured: MARK_API_KEY is not set.")
+    if x_api_key != MARK_API_KEY:
+        raise HTTPException(status_code=401, detail="Missing or invalid API key.")
+    return True
 
 model = whisper.load_model("base")
 
@@ -189,7 +228,7 @@ def _process_local_file(temp_video_path: str, record_id: str = None) -> dict:
     }
 
 @app.post("/process-video")
-async def process_video(file: UploadFile = File(...), record_id: str = Form(None)):
+async def process_video(file: UploadFile = File(...), record_id: str = Form(None), authorized: bool = Depends(verify_api_key)):
     temp_video_path = f"/tmp/{file.filename}"
     try:
         print(f"[UPLOAD] Receiving local file stream: {file.filename}")
@@ -237,7 +276,7 @@ class VideoUrlRequest(BaseModel):
     record_id: str = None
 
 @app.post("/process-video-url")
-async def process_video_url(payload: VideoUrlRequest):
+async def process_video_url(payload: VideoUrlRequest, authorized: bool = Depends(verify_api_key)):
     temp_video_path = f"/tmp/{uuid.uuid4().hex}.mp4"
     try:
         if "drive.google.com" in payload.video_url or "drive.usercontent.google.com" in payload.video_url:
@@ -290,8 +329,12 @@ class WebhookRequest(BaseModel):
     file_url: str
 
 @app.post("/process-webhook")
-async def process_webhook(payload: WebhookRequest):
-    return await process_video_url(VideoUrlRequest(video_url=payload.file_url, record_id=payload.ID))
+async def process_webhook(payload: WebhookRequest, authorized: bool = Depends(verify_api_key)):
+    # Already verified via this route's own Depends() above -- pass
+    # authorized=True through explicitly since calling process_video_url()
+    # directly like this (not through FastAPI routing) skips its own
+    # Depends() injection.
+    return await process_video_url(VideoUrlRequest(video_url=payload.file_url, record_id=payload.ID), authorized=True)
 
 # --- NEW ENDPOINT (added 2026-08-04, patched by Claude) ---
 # WHY THIS EXISTS: every other endpoint in this file writes to the sheet;
@@ -302,7 +345,7 @@ async def process_webhook(payload: WebhookRequest):
 # uploader, or anything else) can render a real list without ever touching
 # Google credentials directly. Read-only, no risk to existing data.
 @app.get("/recent-content")
-async def recent_content(limit: int = 20):
+async def recent_content(limit: int = 20, authorized: bool = Depends(verify_api_key)):
     sheet = get_google_sheet()
     if not sheet:
         raise HTTPException(status_code=502, detail="Could not connect to Google Sheet.")
