@@ -100,6 +100,29 @@ def get_google_sheet():
         print(f"[SHEETS] Connection error: {e}")
         return None
 
+# --- BUG FIX (patched by Claude, session 2026-08-06) ---
+# WHY THIS EXISTS: Whisper doesn't fail cleanly on silent/no-speech audio --
+# it hallucinates short filler text instead (observed live in the MARK
+# sheet: "you you you you you" on two separate rows, from clips with little
+# or no real speech). Before this fix, run_content_pipeline() had no way to
+# tell a hallucinated 5-word transcript from a real one, so it handed
+# "you you you you you" straight to GPT-4o-mini, which -- because LLMs are
+# built to be helpful even from bad input -- confidently invented a full
+# summary/X-post/newsletter about "practical engineering" and "real-world
+# execution" that Mike never said. That's a real risk for MARK specifically,
+# since its whole purpose is publishing what was actually said on camera.
+# THE FIX: flag transcripts that are too short or too repetitive *before*
+# they reach the LLM, and skip content generation entirely for those,
+# writing a visible "NEEDS REVIEW" marker instead of fabricated content.
+def is_low_quality_transcript(text: str) -> bool:
+    words = text.strip().split()
+    if len(words) < 8:
+        return True
+    unique_words = {w.lower().strip(".,!?") for w in words}
+    if len(unique_words) <= 2:
+        return True
+    return False
+
 def run_content_pipeline(video_path: str):
     print(f"[PIPELINE] Running Whisper on {video_path}...")
     result = model.transcribe(video_path)
@@ -107,6 +130,15 @@ def run_content_pipeline(video_path: str):
 
     if not raw_transcript:
         raise HTTPException(status_code=400, detail="No speech extracted from video.")
+
+    if is_low_quality_transcript(raw_transcript):
+        print(f"[PIPELINE] Transcript too short/repetitive ({raw_transcript!r}) -- skipping LLM, flagging for review.")
+        return raw_transcript, {
+            "summary": "⚠️ NEEDS REVIEW — transcript too short or unclear to generate content automatically. Re-record or check audio.",
+            "x_post": "",
+            "newsletter": "",
+            "needs_review": True
+        }
 
     print(f"[PIPELINE] Transcript generated ({len(raw_transcript)} chars). Running LLM...")
 
